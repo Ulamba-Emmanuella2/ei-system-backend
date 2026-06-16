@@ -16,6 +16,15 @@ def health():
         "message": "EI system API is online (cloud version)"
     }), 200
 
+@app.route("/test-hf", methods=["GET"])
+def test_hf():
+    import requests
+    try:
+        r = requests.get("https://huggingface.co", timeout=10)
+        return jsonify({"status": "reachable", "code": r.status_code})
+    except Exception as e:
+        return jsonify({"status": "unreachable", "error": str(e)})
+
 @app.route("/debug", methods=["GET"])
 def debug():
     import os
