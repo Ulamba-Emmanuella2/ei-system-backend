@@ -6,6 +6,7 @@
 import os
 from flask import Flask, request, jsonify
 from pipeline_cloud import analyze_ei_cloud
+from session_manager import start_session, process_reply, end_session, get_session
 app = Flask(__name__)
 
 
@@ -168,6 +169,50 @@ def analyze():
     }
 
     return jsonify(response), 200
+
+
+@app.route("/start", methods=["POST"])
+def start():
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No JSON body received"}), 400
+    try:
+        result = start_session(
+            situation=data["situation"],
+            cultural_context=data.get("cultural_context", "african"),
+            relationship_context=data.get("relationship_context", "peer"),
+            power_dynamic=data.get("power_dynamic", "equal")
+        )
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/reply", methods=["POST"])
+def reply():
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No JSON body received"}), 400
+    try:
+        result = process_reply(
+            session_id=data["session_id"],
+            user_message=data["user_message"]
+        )
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/end", methods=["POST"])
+def end():
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No JSON body received"}), 400
+    try:
+        result = end_session(session_id=data["session_id"])
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
