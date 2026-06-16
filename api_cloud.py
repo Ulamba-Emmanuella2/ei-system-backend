@@ -6,9 +6,6 @@
 import os
 from flask import Flask, request, jsonify
 from pipeline_cloud import analyze_ei_cloud
-from flask import Flask, request, jsonify
-from pipeline_cloud import analyze_ei_cloud
-
 app = Flask(__name__)
 
 
