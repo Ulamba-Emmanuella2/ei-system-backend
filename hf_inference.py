@@ -13,12 +13,11 @@ HF_TOKEN = os.environ.get("HF_TOKEN", "")
 HEADERS  = {"Authorization": f"Bearer {HF_TOKEN}"}
 
 # Model endpoints
-EMOTION_URL       = "https://api-inference.huggingface.co/models/j-hartmann/emotion-english-distilroberta-base"
-SENTIMENT_URL     = "https://api-inference.huggingface.co/models/cardiffnlp/twitter-roberta-base-sentiment-latest"
-TOXICITY_URL      = "https://api-inference.huggingface.co/models/unitary/toxic-bert"
-NLI_URL           = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
-SIMILARITY_URL    = "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2"
-
+EMOTION_URL       = "https://router.huggingface.co/hf-inference/models/j-hartmann/emotion-english-distilroberta-base"
+SENTIMENT_URL     = "https://router.huggingface.co/hf-inference/models/cardiffnlp/twitter-roberta-base-sentiment-latest"
+TOXICITY_URL      = "https://router.huggingface.co/hf-inference/models/unitary/toxic-bert"
+NLI_URL           = "https://router.huggingface.co/hf-inference/models/facebook/bart-large-mnli"
+SIMILARITY_URL    = "https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2"
 
 def _call_api(url, payload, retries=5):
     """
