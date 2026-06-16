@@ -3,6 +3,9 @@
 # Uses HuggingFace Inference API — no local models needed
 # ============================================================
 
+import os
+from flask import Flask, request, jsonify
+from pipeline_cloud import analyze_ei_cloud
 from flask import Flask, request, jsonify
 from pipeline_cloud import analyze_ei_cloud
 
