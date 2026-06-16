@@ -16,6 +16,22 @@ def health():
         "message": "EI system API is online (cloud version)"
     }), 200
 
+@app.route("/test-emotion", methods=["GET"])
+def test_emotion():
+    import requests, os
+    token = os.environ.get("HF_TOKEN", "")
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        r = requests.post(
+            "https://router.huggingface.co/hf-inference/models/j-hartmann/emotion-english-distilroberta-base",
+            headers=headers,
+            json={"inputs": "I am really sorry I hurt you"},
+            timeout=30
+        )
+        return jsonify({"status": r.status_code, "response": r.json()})
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
 @app.route("/test-hf-router", methods=["GET"])
 def test_hf_router():
     import requests, os
