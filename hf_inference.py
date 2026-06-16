@@ -127,6 +127,11 @@ def classify_zero_shot_api(text, candidate_labels):
         }
     })
 
+    # Router returns flat list instead of dict
+    if isinstance(result, list):
+        return {item["label"]: item["score"] for item in result}
+
+    # Original format fallback
     labels = result["labels"]
     scores = result["scores"]
     return dict(zip(labels, scores))
