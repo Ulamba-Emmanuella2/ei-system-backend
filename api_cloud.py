@@ -16,6 +16,22 @@ def health():
         "message": "EI system API is online (cloud version)"
     }), 200
 
+@app.route("/test-hf-router", methods=["GET"])
+def test_hf_router():
+    import requests, os
+    token = os.environ.get("HF_TOKEN", "")
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        r = requests.post(
+            "https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2",
+            headers=headers,
+            json={"inputs": {"source_sentence": "hello", "sentences": ["hi"]}},
+            timeout=30
+        )
+        return jsonify({"status": r.status_code, "response": r.json()})
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
 @app.route("/test-hf-api", methods=["GET"])
 def test_hf_api():
     import requests, os
