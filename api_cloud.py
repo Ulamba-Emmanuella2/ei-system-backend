@@ -16,6 +16,40 @@ def health():
         "message": "EI system API is online (cloud version)"
     }), 200
 
+@app.route("/test-all", methods=["GET"])
+def test_all():
+    import requests, os
+    token = os.environ.get("HF_TOKEN", "")
+    headers = {"Authorization": f"Bearer {token}"}
+    base = "https://router.huggingface.co/hf-inference/models"
+    results = {}
+
+    # Test sentiment
+    try:
+        r = requests.post(f"{base}/cardiffnlp/twitter-roberta-base-sentiment-latest",
+            headers=headers, json={"inputs": "I am sorry"}, timeout=30)
+        results["sentiment"] = r.json()
+    except Exception as e:
+        results["sentiment"] = str(e)
+
+    # Test toxicity
+    try:
+        r = requests.post(f"{base}/unitary/toxic-bert",
+            headers=headers, json={"inputs": "I am sorry"}, timeout=30)
+        results["toxicity"] = r.json()
+    except Exception as e:
+        results["toxicity"] = str(e)
+
+    # Test NLI
+    try:
+        r = requests.post(f"{base}/facebook/bart-large-mnli",
+            headers=headers, json={"inputs": "I am sorry", "parameters": {"candidate_labels": ["apology", "denial"]}}, timeout=30)
+        results["nli"] = r.json()
+    except Exception as e:
+        results["nli"] = str(e)
+
+    return jsonify(results)
+
 @app.route("/test-emotion", methods=["GET"])
 def test_emotion():
     import requests, os
