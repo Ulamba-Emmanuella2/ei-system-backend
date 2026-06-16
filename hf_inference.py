@@ -20,7 +20,7 @@ NLI_URL           = "https://api-inference.huggingface.co/models/facebook/bart-l
 SIMILARITY_URL    = "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2"
 
 
-def _call_api(url, payload, retries=3):
+def _call_api(url, payload, retries=5):
     """
     Calls HuggingFace Inference API with retry logic.
     Models sometimes need to warm up — retries handle this.
@@ -39,7 +39,7 @@ def _call_api(url, payload, retries=3):
         # Error — retry
         if isinstance(result, dict) and "error" in result:
             print(f"API error: {result['error']} — retrying...")
-            time.sleep(5)
+            time.sleep(20)
             continue
 
         return result
