@@ -16,7 +16,14 @@ def health():
         "message": "EI system API is online (cloud version)"
     }), 200
 
-
+@app.route("/debug", methods=["GET"])
+def debug():
+    import os
+    token = os.environ.get("HF_TOKEN", "")
+    return jsonify({
+        "token_set": bool(token),
+        "token_preview": token[:8] + "..." if token else "EMPTY"
+    }), 200
 @app.route("/analyze", methods=["POST"])
 def analyze():
     data = request.get_json()
