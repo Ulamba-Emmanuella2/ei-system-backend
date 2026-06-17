@@ -114,13 +114,14 @@ def process_reply(session_id, user_message):
         )
 
         session["turn_scores"].append({
-            "turn_number":    turn_number,
-            "user_message":   user_message,
-            "ei_score":       ei_result["ei_score"],
+            "turn_number": turn_number,
+            "user_message": user_message,
+            "ei_score": ei_result["ei_score"],
             "classification": ei_result["classification"],
-            "metrics":        ei_result["metrics"],
-            "categories":     ei_result["categories"],
-            "nlp_outputs":    ei_result.get("nlp_outputs", {})
+            "metrics": ei_result["metrics"],
+            "categories": ei_result["categories"],
+            "nlp_outputs": ei_result.get("nlp_outputs", {}),
+            "rephrasing": ei_result.get("rephrasing", {})
         })
 
     except Exception as e:
