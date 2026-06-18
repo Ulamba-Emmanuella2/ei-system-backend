@@ -4,6 +4,7 @@
 # ============================================================
 
 import uuid
+import threading
 from pipeline_cloud import analyze_ei_cloud as analyze_ei
 from conversation_engine import build_character_profile, generate_response, GROQ_API_KEY
 
@@ -78,8 +79,8 @@ def start_session(
 def process_reply(session_id, user_message):
     """
     Processes one user reply:
-    1. Scores the reply silently using the EI pipeline
-    2. Generates the AI character's response
+    1. Generates the AI character's response immediately
+    2. Scores the reply silently in the background
     3. Stores everything in the session
 
     Input:
@@ -100,40 +101,7 @@ def process_reply(session_id, user_message):
     turn_number = session["turn_number"]
 
     # ----------------------------------------------------------
-    # SCORE THIS TURN SILENTLY
-    # User never sees this — stored for the final report
-    # ----------------------------------------------------------
-    try:
-        ei_result = analyze_ei(
-            scenario_text=session["situation"],
-            response_text=user_message,
-            scenario_requires_apology=session["character_profile"]["scenario_requires_apology"],
-            cultural_context=session["cultural_context"],
-            relationship_context=session["relationship_context"],
-            power_dynamic=session["power_dynamic"]
-        )
-
-        session["turn_scores"].append({
-            "turn_number": turn_number,
-            "user_message": user_message,
-            "ei_score": ei_result["ei_score"],
-            "classification": ei_result["classification"],
-            "metrics": ei_result["metrics"],
-            "categories": ei_result["categories"],
-            "nlp_outputs": ei_result.get("nlp_outputs", {}),
-            "rephrasing": ei_result.get("rephrasing", {})
-        })
-
-    except Exception as e:
-        session["turn_scores"].append({
-            "turn_number":  turn_number,
-            "user_message": user_message,
-            "ei_score":     None,
-            "error":        str(e)
-        })
-
-    # ----------------------------------------------------------
-    # GENERATE AI RESPONSE
+    # GENERATE AI RESPONSE FIRST — user gets reply immediately
     # ----------------------------------------------------------
     ai_response = generate_response(
         situation=session["situation"],
@@ -144,13 +112,59 @@ def process_reply(session_id, user_message):
         cultural_context=session["cultural_context"]
     )
 
-    # ----------------------------------------------------------
-    # STORE THIS TURN IN HISTORY
-    # ----------------------------------------------------------
+    # Store turn in history immediately
     session["conversation_history"].append({
         "user": user_message,
         "ai":   ai_response
     })
+
+    # Placeholder so turn order is preserved
+    session["turn_scores"].append({
+        "turn_number":  turn_number,
+        "user_message": user_message,
+        "ei_score":     None,
+        "status":       "scoring"
+    })
+
+    # ----------------------------------------------------------
+    # SCORE IN BACKGROUND — user does not wait for this
+    # ----------------------------------------------------------
+    def score_in_background():
+        try:
+            ei_result = analyze_ei(
+                scenario_text=session["situation"],
+                response_text=user_message,
+                scenario_requires_apology=session["character_profile"]["scenario_requires_apology"],
+                cultural_context=session["cultural_context"],
+                relationship_context=session["relationship_context"],
+                power_dynamic=session["power_dynamic"]
+            )
+
+            # Find and update the placeholder
+            for turn in session["turn_scores"]:
+                if turn["turn_number"] == turn_number:
+                    turn.update({
+                        "ei_score":       ei_result["ei_score"],
+                        "classification": ei_result["classification"],
+                        "metrics":        ei_result["metrics"],
+                        "categories":     ei_result["categories"],
+                        "nlp_outputs":    ei_result.get("nlp_outputs", {}),
+                        "rephrasing":     ei_result.get("rephrasing", {}),
+                        "status":         "done"
+                    })
+                    break
+
+        except Exception as e:
+            for turn in session["turn_scores"]:
+                if turn["turn_number"] == turn_number:
+                    turn.update({
+                        "ei_score": None,
+                        "error":    str(e),
+                        "status":   "failed"
+                    })
+                    break
+
+    threading.Thread(target=score_in_background, daemon=True).start()
 
     return {
         "ai_response": ai_response,
@@ -179,6 +193,15 @@ def end_session(session_id):
 
     session = _sessions[session_id]
     scores  = session["turn_scores"]
+
+    # ----------------------------------------------------------
+    # WAIT FOR ANY STILL-SCORING TURNS (max 60 seconds)
+    # ----------------------------------------------------------
+    import time
+    waited = 0
+    while any(t.get("status") == "scoring" for t in scores) and waited < 60:
+        time.sleep(2)
+        waited += 2
 
     # ----------------------------------------------------------
     # CALCULATE OVERALL SCORE
@@ -293,7 +316,6 @@ def end_session(session_id):
     }
 
     # Keep session in memory — do NOT delete
-    # /report endpoint can re-fetch this any time
     session["status"]       = "ended"
     session["final_report"] = final_report
 
