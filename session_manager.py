@@ -103,6 +103,7 @@ def _analyze_full_conversation(session, user_message):
     situation            = session["situation"]
     cultural_context     = session["cultural_context"]
     relationship_context = session["relationship_context"]
+    goal                  = session.get("goal", "apologise")
     history               = session["conversation_history"]
     state                 = session["state"]
 
@@ -114,6 +115,44 @@ def _analyze_full_conversation(session, user_message):
     transcript_lines.append(f'User (NEW REPLY TO SCORE): "{user_message}"')
     transcript = "\n".join(transcript_lines)
 
+    # Who is actually at fault in this scenario determines whether holding
+    # the other person accountable counts as "blame" (bad) or legitimate
+    # accountability-holding (good). Scoring must know this, the same way
+    # the character-building step does.
+    if goal == "stand_firm":
+        fault_context = """
+        IMPORTANT — WHO IS AT FAULT IN THIS SCENARIO:
+        The USER was wronged by the other person (the other person caused
+        the harmful event described in the situation). This means:
+        - If the user accurately and proportionately names what the other
+          person did wrong (e.g. "you slapped me, that's not okay"), this
+          is LEGITIMATE ACCOUNTABILITY-HOLDING, not blame. Do NOT mark
+          blame_detected=true for this. This is good, assertive EI.
+        - Only mark blame_detected=true if the user is being UNFAIR,
+          exaggerating, name-calling, insulting, or escalating beyond what
+          the situation warrants — i.e. genuine toxicity, not just stating
+          what happened.
+        - The user does NOT need to apologize or take accountability in
+          this scenario — they are not the one at fault. Do not let a lack
+          of self-blame lower your judgment of empathy or self-awareness.
+        """
+    elif goal == "apologise":
+        fault_context = """
+        IMPORTANT — WHO IS AT FAULT IN THIS SCENARIO:
+        The USER is the one who did something wrong, and the other person
+        was genuinely hurt by it. If the user shifts responsibility back
+        onto the other person instead of acknowledging their own role,
+        mark blame_detected=true — this is true blame-shifting here.
+        """
+    else:
+        fault_context = """
+        IMPORTANT — WHO IS AT FAULT IN THIS SCENARIO:
+        This is a two-sided situation where both people may share some
+        responsibility. Judge blame_detected based on whether the user is
+        being fair and proportionate versus unfairly dumping all
+        responsibility on the other person.
+        """
+
     prompt = f"""
 You are an expert emotional intelligence analyst. Score the user's NEWEST
 reply (marked "NEW REPLY TO SCORE" below), but base your judgment on the
@@ -124,6 +163,7 @@ pattern and responds to what was just said to them.
 
 CULTURAL CONTEXT: {cultural_context}
 RELATIONSHIP: {relationship_context}
+{fault_context}
 Apology already given by the user at some earlier point in this conversation: {state['apology_given']}
 Accountability already taken by the user at some earlier point in this conversation: {state['accountability_given']}
 
@@ -131,10 +171,11 @@ FULL TRANSCRIPT:
 {transcript}
 
 Estimate the following about the user's NEWEST reply, in light of the full
-conversation above:
+conversation above AND the fault context given:
 
 - sentiment_score: a number from -1.0 (very negative) to 1.0 (very positive)
-- toxicity_score: a number from 0.0 (not toxic at all) to 1.0 (very toxic/harmful)
+- toxicity_score: a number from 0.0 (not toxic at all) to 1.0 (very toxic/harmful) —
+  judge ACTUAL toxic language (insults, contempt, aggression), not just firmness
 - emotion_alignment_score: a number from 0.0 to 1.0 — how emotionally
   attuned is this reply to what the other person just said and how they
   are feeling, considering the conversation so far
@@ -143,16 +184,18 @@ conversation above:
 - directness_score: a number from 0.0 (very indirect/hedging) to 1.0
   (very direct/assertive)
 - confrontation_score: a number from 0.0 (calm, de-escalating) to 1.0
-  (highly confrontational/escalating)
+  (highly confrontational/escalating) — being firm and clear is NOT the
+  same as being confrontational; only score this high for genuine
+  escalation or hostility
 - apology_detected: true if the user has given a genuine apology either
   in this new reply OR at any earlier point in the conversation (if the
   flag above already says true, this must be true)
-- blame_detected: true if THIS NEW REPLY blames or accuses the other
-  person (judge only the new reply for this one — blame can return even
-  after an earlier apology)
+- blame_detected: follow the fault context above carefully — this is NOT
+  simply "did the user mention something the other person did wrong"
 - accountability_detected: true if the user has taken personal
   responsibility either in this new reply OR at any earlier point (if the
-  flag above already says true, this must be true)
+  flag above already says true, this must be true) — only relevant if the
+  user actually owes accountability per the fault context above
 - other_emotion_reference: true if THIS NEW REPLY genuinely acknowledges
   or validates the other person's feelings (not just mentioning them while
   arguing)
