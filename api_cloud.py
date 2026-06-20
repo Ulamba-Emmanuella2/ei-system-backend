@@ -7,6 +7,7 @@ import os
 from flask import Flask, request, jsonify
 from pipeline_cloud import analyze_ei_cloud
 from session_manager import start_session, process_reply, end_session, get_session
+
 app = Flask(__name__)
 
 
@@ -17,105 +18,7 @@ def health():
         "message": "EI system API is online (cloud version)"
     }), 200
 
-@app.route("/test-all", methods=["GET"])
-def test_all():
-    import requests, os
-    token = os.environ.get("HF_TOKEN", "")
-    headers = {"Authorization": f"Bearer {token}"}
-    base = "https://router.huggingface.co/hf-inference/models"
-    results = {}
 
-    # Test sentiment
-    try:
-        r = requests.post(f"{base}/cardiffnlp/twitter-roberta-base-sentiment-latest",
-            headers=headers, json={"inputs": "I am sorry"}, timeout=30)
-        results["sentiment"] = r.json()
-    except Exception as e:
-        results["sentiment"] = str(e)
-
-    # Test toxicity
-    try:
-        r = requests.post(f"{base}/unitary/toxic-bert",
-            headers=headers, json={"inputs": "I am sorry"}, timeout=30)
-        results["toxicity"] = r.json()
-    except Exception as e:
-        results["toxicity"] = str(e)
-
-    # Test NLI
-    try:
-        r = requests.post(f"{base}/facebook/bart-large-mnli",
-            headers=headers, json={"inputs": "I am sorry", "parameters": {"candidate_labels": ["apology", "denial"]}}, timeout=30)
-        results["nli"] = r.json()
-    except Exception as e:
-        results["nli"] = str(e)
-
-    return jsonify(results)
-
-@app.route("/test-emotion", methods=["GET"])
-def test_emotion():
-    import requests, os
-    token = os.environ.get("HF_TOKEN", "")
-    headers = {"Authorization": f"Bearer {token}"}
-    try:
-        r = requests.post(
-            "https://router.huggingface.co/hf-inference/models/j-hartmann/emotion-english-distilroberta-base",
-            headers=headers,
-            json={"inputs": "I am really sorry I hurt you"},
-            timeout=30
-        )
-        return jsonify({"status": r.status_code, "response": r.json()})
-    except Exception as e:
-        return jsonify({"error": str(e)})
-
-@app.route("/test-hf-router", methods=["GET"])
-def test_hf_router():
-    import requests, os
-    token = os.environ.get("HF_TOKEN", "")
-    headers = {"Authorization": f"Bearer {token}"}
-    try:
-        r = requests.post(
-            "https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2",
-            headers=headers,
-            json={"inputs": {"source_sentence": "hello", "sentences": ["hi"]}},
-            timeout=30
-        )
-        return jsonify({"status": r.status_code, "response": r.json()})
-    except Exception as e:
-        return jsonify({"error": str(e)})
-
-@app.route("/test-hf-api", methods=["GET"])
-def test_hf_api():
-    import requests, os
-    token = os.environ.get("HF_TOKEN", "")
-    headers = {"Authorization": f"Bearer {token}"}
-    try:
-        r = requests.post(
-            "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2",
-            headers=headers,
-            json={"inputs": {"source_sentence": "hello", "sentences": ["hi"]}},
-            timeout=30
-        )
-        return jsonify({"status": r.status_code, "response": r.json()})
-    except Exception as e:
-        return jsonify({"error": str(e)})
-
-@app.route("/test-hf", methods=["GET"])
-def test_hf():
-    import requests
-    try:
-        r = requests.get("https://huggingface.co", timeout=10)
-        return jsonify({"status": "reachable", "code": r.status_code})
-    except Exception as e:
-        return jsonify({"status": "unreachable", "error": str(e)})
-
-@app.route("/debug", methods=["GET"])
-def debug():
-    import os
-    token = os.environ.get("HF_TOKEN", "")
-    return jsonify({
-        "token_set": bool(token),
-        "token_preview": token[:8] + "..." if token else "EMPTY"
-    }), 200
 @app.route("/analyze", methods=["POST"])
 def analyze():
     data = request.get_json()
@@ -181,7 +84,8 @@ def start():
             situation=data["situation"],
             cultural_context=data.get("cultural_context", "african"),
             relationship_context=data.get("relationship_context", "peer"),
-            power_dynamic=data.get("power_dynamic", "equal")
+            power_dynamic=data.get("power_dynamic", "equal"),
+            goal=data.get("goal", "apologise")
         )
         return jsonify(result), 200
     except Exception as e:
@@ -214,20 +118,6 @@ def end():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/test-start", methods=["GET"])
-def test_start():
-    try:
-        from session_manager import start_session
-        result = start_session(
-            situation="Your friend feels hurt because you forgot their birthday",
-            cultural_context="african",
-            relationship_context="peer",
-            power_dynamic="equal"
-        )
-        return jsonify(result), 200
-    except Exception as e:
-        import traceback
-        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5001))
