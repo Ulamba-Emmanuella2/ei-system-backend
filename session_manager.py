@@ -1,12 +1,29 @@
 # session_manager.py
-# Tracks the full conversation, scores each turn silently,
-# and builds the final EI report at the end
+# Tracks the full conversation and scores each turn by reading
+# the ENTIRE transcript so far — not just the latest message in
+# isolation, and not just the latest pair of messages.
+#
+# ARCHITECTURE:
+# - One Groq call per turn reads the whole conversation history
+#   and estimates ALL the raw signals ei_engine.py needs:
+#   sentiment, toxicity, emotion alignment, similarity/relevance,
+#   directness, confrontation, apology, blame, accountability,
+#   other_emotion_reference.
+# - ei_engine.py is UNCHANGED — same lookup tables, same cultural
+#   adaptation math, same metric names, same weights. It simply
+#   receives better-informed inputs.
+# - apology_given and accountability_given still persist once true
+#   for the rest of the session (Groq is also told this directly,
+#   as a safety net on top of persistence).
 # ============================================================
 
+import os
+import json
 import uuid
-import threading
-from pipeline_cloud import analyze_ei_cloud as analyze_ei
+from groq import Groq
+
 from conversation_engine import build_character_profile, generate_response, GROQ_API_KEY
+from ei_engine import ei_evaluation_engine
 
 
 # ============================================================
@@ -14,6 +31,9 @@ from conversation_engine import build_character_profile, generate_response, GROQ
 # ============================================================
 
 _sessions = {}
+
+_groq_client = Groq(api_key=GROQ_API_KEY)
+_MODEL       = "llama-3.3-70b-versatile"
 
 
 # ============================================================
@@ -24,42 +44,41 @@ def start_session(
     situation,
     cultural_context="african",
     relationship_context="peer",
-    power_dynamic="equal"
+    power_dynamic="equal",
+    goal=None
 ):
     """
     Creates a new conversation session.
-
-    Input:
-        situation            (str) — what the user described
-        cultural_context     (str) — african / western / asian
-        relationship_context (str) — elder / peer / subordinate / stranger
-        power_dynamic        (str) — higher / equal / lower
-
-    Output:
-        dict with:
-            session_id      (str)  — unique ID for this session
-            opening_message (str)  — first message from the AI character
-            character       (dict) — the character profile
     """
 
-    profile    = build_character_profile(
+    profile = build_character_profile(
         situation=situation,
         relationship_context=relationship_context,
-        cultural_context=cultural_context
+        cultural_context=cultural_context,
+        goal=goal
     )
     session_id = str(uuid.uuid4())
 
     _sessions[session_id] = {
-        "situation":            situation,
-        "cultural_context":     cultural_context,
-        "relationship_context": relationship_context,
-        "power_dynamic":        power_dynamic,
-        "character_profile":    profile,
-        "conversation_history": [],
-        "turn_scores":          [],
-        "turn_number":          0,
-        "status":               "active",
-        "final_report":         None
+        "situation":             situation,
+        "cultural_context":      cultural_context,
+        "relationship_context":  relationship_context,
+        "power_dynamic":         power_dynamic,
+        "goal":                  profile.get("goal", "apologise"),
+        "character_profile":     profile,
+        "conversation_history":  [],
+        "turn_scores":           [],
+        "turn_number":           0,
+        "status":                "active",
+        "final_report":          None,
+
+        # Persistent state — once true, stays true for the rest of
+        # the session. Passed into the prompt every turn as a hard
+        # fact, on top of asking Groq to look for it itself.
+        "state": {
+            "apology_given":        False,
+            "accountability_given": False
+        }
     }
 
     return {
@@ -73,26 +92,182 @@ def start_session(
 
 
 # ============================================================
+# WHOLE-CONVERSATION SIGNAL ANALYSIS (Groq)
+#
+# Reads the FULL transcript so far and estimates every raw
+# signal ei_engine.py needs, judged in light of everything said,
+# not just the newest message or the newest pair.
+# ============================================================
+
+def _analyze_full_conversation(session, user_message):
+    situation            = session["situation"]
+    cultural_context     = session["cultural_context"]
+    relationship_context = session["relationship_context"]
+    history               = session["conversation_history"]
+    state                 = session["state"]
+
+    transcript_lines = [f'SITUATION: "{situation}"', ""]
+    for turn in history:
+        transcript_lines.append(f'Other person: "{turn["ai"]}"')
+        transcript_lines.append(f'User: "{turn["user"]}"')
+    transcript_lines.append(f'Other person: "{history[-1]["ai"] if history else session["character_profile"]["opening_message"]}"')
+    transcript_lines.append(f'User (NEW REPLY TO SCORE): "{user_message}"')
+    transcript = "\n".join(transcript_lines)
+
+    prompt = f"""
+You are an expert emotional intelligence analyst. Score the user's NEWEST
+reply (marked "NEW REPLY TO SCORE" below), but base your judgment on the
+ENTIRE conversation so far — not just the newest message alone, and not
+just the single line before it. Consider the whole arc: how the user has
+been communicating throughout, and how the latest reply fits into that
+pattern and responds to what was just said to them.
+
+CULTURAL CONTEXT: {cultural_context}
+RELATIONSHIP: {relationship_context}
+Apology already given by the user at some earlier point in this conversation: {state['apology_given']}
+Accountability already taken by the user at some earlier point in this conversation: {state['accountability_given']}
+
+FULL TRANSCRIPT:
+{transcript}
+
+Estimate the following about the user's NEWEST reply, in light of the full
+conversation above:
+
+- sentiment_score: a number from -1.0 (very negative) to 1.0 (very positive)
+- toxicity_score: a number from 0.0 (not toxic at all) to 1.0 (very toxic/harmful)
+- emotion_alignment_score: a number from 0.0 to 1.0 — how emotionally
+  attuned is this reply to what the other person just said and how they
+  are feeling, considering the conversation so far
+- similarity_score: a number from 0.0 to 1.0 — how relevant and on-topic
+  is this reply to what is actually being discussed in the conversation
+- directness_score: a number from 0.0 (very indirect/hedging) to 1.0
+  (very direct/assertive)
+- confrontation_score: a number from 0.0 (calm, de-escalating) to 1.0
+  (highly confrontational/escalating)
+- apology_detected: true if the user has given a genuine apology either
+  in this new reply OR at any earlier point in the conversation (if the
+  flag above already says true, this must be true)
+- blame_detected: true if THIS NEW REPLY blames or accuses the other
+  person (judge only the new reply for this one — blame can return even
+  after an earlier apology)
+- accountability_detected: true if the user has taken personal
+  responsibility either in this new reply OR at any earlier point (if the
+  flag above already says true, this must be true)
+- other_emotion_reference: true if THIS NEW REPLY genuinely acknowledges
+  or validates the other person's feelings (not just mentioning them while
+  arguing)
+
+Respond ONLY in this exact JSON format, no extra text, no markdown fences:
+
+{{
+    "sentiment_score": <float>,
+    "toxicity_score": <float>,
+    "emotion_alignment_score": <float>,
+    "similarity_score": <float>,
+    "directness_score": <float>,
+    "confrontation_score": <float>,
+    "apology_detected": true or false,
+    "blame_detected": true or false,
+    "accountability_detected": true or false,
+    "other_emotion_reference": true or false
+}}
+"""
+
+    response = _groq_client.chat.completions.create(
+        model=_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2
+    )
+
+    raw = response.choices[0].message.content.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    raw = raw.strip()
+
+    result = json.loads(raw)
+
+    # Conflict resolution — same rule as the original engine
+    if result.get("blame_detected") and result.get("accountability_detected") and result.get("apology_detected"):
+        result["blame_detected"] = False
+
+    # Clamp numeric ranges defensively
+    def _clamp(v, lo, hi, default):
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return default
+        return max(lo, min(hi, v))
+
+    return {
+        "sentiment_score":         _clamp(result.get("sentiment_score"), -1.0, 1.0, 0.0),
+        "toxicity_score":          _clamp(result.get("toxicity_score"), 0.0, 1.0, 0.0),
+        "emotion_alignment_score": _clamp(result.get("emotion_alignment_score"), 0.0, 1.0, 0.5),
+        "similarity_score":        _clamp(result.get("similarity_score"), 0.0, 1.0, 0.5),
+        "directness_score":        _clamp(result.get("directness_score"), 0.0, 1.0, 0.5),
+        "confrontation_score":     _clamp(result.get("confrontation_score"), 0.0, 1.0, 0.2),
+        "apology_detected":        bool(result.get("apology_detected", False)),
+        "blame_detected":          bool(result.get("blame_detected", False)),
+        "accountability_detected": bool(result.get("accountability_detected", False)),
+        "other_emotion_reference": bool(result.get("other_emotion_reference", False))
+    }
+
+
+# ============================================================
+# SCORE ONE TURN — ei_engine.py is the scoring authority
+# ============================================================
+
+def _score_turn(session, user_message):
+    state = session["state"]
+
+    signals = _analyze_full_conversation(session, user_message)
+
+    scenario_requires_apology = session["character_profile"].get("scenario_requires_apology", True)
+
+    # Apply persistence on top of Groq's own context read, as a hard guarantee
+    apology_for_engine        = signals["apology_detected"] or state["apology_given"]
+    accountability_for_engine = signals["accountability_detected"] or state["accountability_given"]
+
+    if signals["apology_detected"]:
+        state["apology_given"] = True
+    if signals["accountability_detected"]:
+        state["accountability_given"] = True
+
+    ei_result = ei_evaluation_engine(
+        sentiment_score=signals["sentiment_score"],
+        toxicity_score=signals["toxicity_score"],
+        emotion_alignment_score=signals["emotion_alignment_score"],
+        similarity_score=signals["similarity_score"],
+        apology_detected=apology_for_engine,
+        scenario_requires_apology=scenario_requires_apology,
+        accountability_detected=accountability_for_engine,
+        blame_detected=signals["blame_detected"],
+        other_emotion_reference=signals["other_emotion_reference"],
+        directness_score=signals["directness_score"],
+        confrontation_score=signals["confrontation_score"],
+        cultural_context=session["cultural_context"],
+        relationship_context=session["relationship_context"],
+        power_dynamic=session["power_dynamic"]
+    )
+
+    ei_result["raw_intent"] = {
+        "apology_detected_this_turn":        signals["apology_detected"],
+        "blame_detected":                    signals["blame_detected"],
+        "accountability_detected_this_turn": signals["accountability_detected"],
+        "other_emotion_reference":           signals["other_emotion_reference"],
+        "apology_satisfied_overall":         apology_for_engine,
+        "accountability_satisfied_overall":  accountability_for_engine
+    }
+
+    return ei_result
+
+
+# ============================================================
 # PROCESS REPLY
 # ============================================================
 
 def process_reply(session_id, user_message):
-    """
-    Processes one user reply:
-    1. Generates the AI character's response immediately
-    2. Scores the reply silently in the background
-    3. Stores everything in the session
-
-    Input:
-        session_id   (str) — from start_session
-        user_message (str) — what the user just typed
-
-    Output:
-        dict with:
-            ai_response  (str) — the character's next message
-            turn_number  (int) — which turn this was
-    """
-
     if session_id not in _sessions:
         raise ValueError(f"Session {session_id} not found")
 
@@ -100,9 +275,27 @@ def process_reply(session_id, user_message):
     session["turn_number"] += 1
     turn_number = session["turn_number"]
 
-    # ----------------------------------------------------------
-    # GENERATE AI RESPONSE FIRST — user gets reply immediately
-    # ----------------------------------------------------------
+    try:
+        ei_result = _score_turn(session, user_message)
+
+        session["turn_scores"].append({
+            "turn_number":    turn_number,
+            "user_message":   user_message,
+            "ei_score":       ei_result["ei_score"],
+            "classification": ei_result["classification"],
+            "metrics":        ei_result["metrics"],
+            "categories":     ei_result["categories"],
+            "raw_intent":     ei_result["raw_intent"]
+        })
+
+    except Exception as e:
+        session["turn_scores"].append({
+            "turn_number":  turn_number,
+            "user_message": user_message,
+            "ei_score":     None,
+            "error":        str(e)
+        })
+
     ai_response = generate_response(
         situation=session["situation"],
         character_profile=session["character_profile"],
@@ -112,59 +305,10 @@ def process_reply(session_id, user_message):
         cultural_context=session["cultural_context"]
     )
 
-    # Store turn in history immediately
     session["conversation_history"].append({
         "user": user_message,
         "ai":   ai_response
     })
-
-    # Placeholder so turn order is preserved
-    session["turn_scores"].append({
-        "turn_number":  turn_number,
-        "user_message": user_message,
-        "ei_score":     None,
-        "status":       "scoring"
-    })
-
-    # ----------------------------------------------------------
-    # SCORE IN BACKGROUND — user does not wait for this
-    # ----------------------------------------------------------
-    def score_in_background():
-        try:
-            ei_result = analyze_ei(
-                scenario_text=session["situation"],
-                response_text=user_message,
-                scenario_requires_apology=session["character_profile"]["scenario_requires_apology"],
-                cultural_context=session["cultural_context"],
-                relationship_context=session["relationship_context"],
-                power_dynamic=session["power_dynamic"]
-            )
-
-            # Find and update the placeholder
-            for turn in session["turn_scores"]:
-                if turn["turn_number"] == turn_number:
-                    turn.update({
-                        "ei_score":       ei_result["ei_score"],
-                        "classification": ei_result["classification"],
-                        "metrics":        ei_result["metrics"],
-                        "categories":     ei_result["categories"],
-                        "nlp_outputs":    ei_result.get("nlp_outputs", {}),
-                        "rephrasing":     ei_result.get("rephrasing", {}),
-                        "status":         "done"
-                    })
-                    break
-
-        except Exception as e:
-            for turn in session["turn_scores"]:
-                if turn["turn_number"] == turn_number:
-                    turn.update({
-                        "ei_score": None,
-                        "error":    str(e),
-                        "status":   "failed"
-                    })
-                    break
-
-    threading.Thread(target=score_in_background, daemon=True).start()
 
     return {
         "ai_response": ai_response,
@@ -177,35 +321,12 @@ def process_reply(session_id, user_message):
 # ============================================================
 
 def end_session(session_id):
-    """
-    Ends the conversation and builds the full EI report.
-    Session is kept in memory so /report can re-fetch it.
-
-    Input:
-        session_id (str) — from start_session
-
-    Output:
-        Full EI report dict
-    """
-
     if session_id not in _sessions:
         raise ValueError(f"Session {session_id} not found")
 
     session = _sessions[session_id]
     scores  = session["turn_scores"]
 
-    # ----------------------------------------------------------
-    # WAIT FOR ANY STILL-SCORING TURNS (max 60 seconds)
-    # ----------------------------------------------------------
-    import time
-    waited = 0
-    while any(t.get("status") == "scoring" for t in scores) and waited < 60:
-        time.sleep(2)
-        waited += 2
-
-    # ----------------------------------------------------------
-    # CALCULATE OVERALL SCORE
-    # ----------------------------------------------------------
     valid_scores = [t["ei_score"] for t in scores if t["ei_score"] is not None]
 
     if valid_scores:
@@ -220,9 +341,6 @@ def end_session(session_id):
     else:
         classification = "Needs Improvement"
 
-    # ----------------------------------------------------------
-    # IDENTIFY GOOD AND BAD TURNS
-    # ----------------------------------------------------------
     good_turns = []
     bad_turns  = []
 
@@ -239,8 +357,7 @@ def end_session(session_id):
         }
 
         metrics = turn.get("metrics",     {})
-        nlp     = turn.get("nlp_outputs", {})
-        intent  = nlp.get("intent",       {})
+        intent  = turn.get("raw_intent",  {})
 
         if turn["ei_score"] >= 70:
             if metrics.get("empathy", 0) >= 70:
@@ -249,10 +366,10 @@ def end_session(session_id):
             if metrics.get("tone_regulation", 0) >= 70:
                 turn_report["highlights"].append(
                     "✅ Your tone was calm and controlled")
-            if intent.get("apology_detected"):
+            if intent.get("apology_satisfied_overall"):
                 turn_report["highlights"].append(
                     "✅ You apologised sincerely when it was needed")
-            if intent.get("accountability_detected"):
+            if intent.get("accountability_satisfied_overall"):
                 turn_report["highlights"].append(
                     "✅ You took responsibility without being prompted")
             if not intent.get("blame_detected"):
@@ -270,18 +387,15 @@ def end_session(session_id):
             if intent.get("blame_detected"):
                 turn_report["highlights"].append(
                     "❌ Blame detected — you shifted responsibility to the other person")
-            if not intent.get("apology_detected") and \
-               session["character_profile"]["scenario_requires_apology"]:
+            if not intent.get("apology_satisfied_overall") and \
+               session["character_profile"].get("scenario_requires_apology"):
                 turn_report["highlights"].append(
                     "❌ No apology given even though the situation required one")
             if metrics.get("context_alignment", 100) < 50:
                 turn_report["highlights"].append(
-                    "❌ Your response was not relevant to the situation")
+                    "❌ Your response was not relevant to the conversation")
             bad_turns.append(turn_report)
 
-    # ----------------------------------------------------------
-    # GENERATE WRITTEN FEEDBACK AND REPHRASING
-    # ----------------------------------------------------------
     feedback_text = _generate_feedback(
         situation=session["situation"],
         overall_score=overall_score,
@@ -294,14 +408,12 @@ def end_session(session_id):
 
     rephrasing = _generate_rephrasing(
         situation=session["situation"],
+        conversation_history=session["conversation_history"],
         bad_turns=bad_turns,
         cultural_context=session["cultural_context"],
         relationship_context=session["relationship_context"]
     )
 
-    # ----------------------------------------------------------
-    # BUILD FINAL REPORT
-    # ----------------------------------------------------------
     conversation_history = session["conversation_history"]
 
     final_report = {
@@ -315,7 +427,6 @@ def end_session(session_id):
         "total_turns":          len(scores)
     }
 
-    # Keep session in memory — do NOT delete
     session["status"]       = "ended"
     session["final_report"] = final_report
 
@@ -339,9 +450,6 @@ def _generate_feedback(
     good_turns, bad_turns,
     cultural_context, relationship_context
 ):
-    from groq import Groq
-    client = Groq(api_key=GROQ_API_KEY)
-
     good_summary = "\n".join([
         f"Turn {t['turn_number']}: {', '.join(t['highlights'])}"
         for t in good_turns
@@ -372,8 +480,8 @@ and one specific thing they should focus on improving.
 Speak directly to them using "you". Be encouraging but honest.
 """
 
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+    response = _groq_client.chat.completions.create(
+        model=_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.6
     )
@@ -384,16 +492,18 @@ Speak directly to them using "you". Be encouraging but honest.
 # GENERATE REPHRASING FOR BAD TURNS (uses Groq)
 # ============================================================
 
-def _generate_rephrasing(situation, bad_turns, cultural_context, relationship_context):
+def _generate_rephrasing(situation, conversation_history, bad_turns, cultural_context, relationship_context):
     if not bad_turns:
         return []
-
-    from groq import Groq
-    client = Groq(api_key=GROQ_API_KEY)
 
     rephrased = []
 
     for turn in bad_turns:
+        turn_index = turn["turn_number"] - 1
+        preceding_ai_message = ""
+        if 0 <= turn_index < len(conversation_history):
+            preceding_ai_message = conversation_history[turn_index]["ai"]
+
         prompt = f"""
 You are an emotional intelligence coach.
 
@@ -401,19 +511,22 @@ SITUATION: {situation}
 CULTURAL CONTEXT: {cultural_context}
 RELATIONSHIP: {relationship_context}
 
-The person said this during the conversation:
+The other person had just said:
+"{preceding_ai_message}"
+
+The user replied:
 "{turn['user_message']}"
 
 Problems with what they said:
 {chr(10).join(turn['highlights'])}
 
-Write a better version of what they could have said.
-Keep it natural and human — not too formal or perfect.
-Just the rephrased message, nothing else.
+Write a better version of what they could have said in direct response to
+what the other person just said above. Keep it natural and human — not too
+formal or perfect. Just the rephrased message, nothing else.
 """
 
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+        response = _groq_client.chat.completions.create(
+            model=_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.6
         )
