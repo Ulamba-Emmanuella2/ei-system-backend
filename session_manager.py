@@ -75,9 +75,16 @@ def start_session(
         # Persistent state — once true, stays true for the rest of
         # the session. Passed into the prompt every turn as a hard
         # fact, on top of asking Groq to look for it itself.
+        #
+        # "apology_given" / "accountability_given" track the USER.
+        # "character_apology_given" / "character_accountability_given"
+        # track the OTHER PERSON (the AI), so we can tell if the user
+        # is repeating a demand that has already been met.
         "state": {
-            "apology_given":        False,
-            "accountability_given": False
+            "apology_given":                    False,
+            "accountability_given":              False,
+            "character_apology_given":           False,
+            "character_accountability_given":    False
         }
     }
 
@@ -164,8 +171,10 @@ pattern and responds to what was just said to them.
 CULTURAL CONTEXT: {cultural_context}
 RELATIONSHIP: {relationship_context}
 {fault_context}
-Apology already given by the user at some earlier point in this conversation: {state['apology_given']}
-Accountability already taken by the user at some earlier point in this conversation: {state['accountability_given']}
+Apology already given by the USER at some earlier point in this conversation: {state['apology_given']}
+Accountability already taken by the USER at some earlier point in this conversation: {state['accountability_given']}
+Apology already given by the OTHER PERSON (the character) at some earlier point: {state['character_apology_given']}
+Accountability already taken by the OTHER PERSON (the character) at some earlier point: {state['character_accountability_given']}
 
 FULL TRANSCRIPT:
 {transcript}
@@ -187,18 +196,30 @@ conversation above AND the fault context given:
   (highly confrontational/escalating) — being firm and clear is NOT the
   same as being confrontational; only score this high for genuine
   escalation or hostility
-- apology_detected: true if the user has given a genuine apology either
+- apology_detected: true if the USER has given a genuine apology either
   in this new reply OR at any earlier point in the conversation (if the
   flag above already says true, this must be true)
 - blame_detected: follow the fault context above carefully — this is NOT
   simply "did the user mention something the other person did wrong"
-- accountability_detected: true if the user has taken personal
+- accountability_detected: true if the USER has taken personal
   responsibility either in this new reply OR at any earlier point (if the
   flag above already says true, this must be true) — only relevant if the
   user actually owes accountability per the fault context above
 - other_emotion_reference: true if THIS NEW REPLY genuinely acknowledges
   or validates the other person's feelings (not just mentioning them while
   arguing)
+- character_apology_detected: true if the OTHER PERSON (character) has
+  given a genuine apology to the user, either just now or earlier in the
+  conversation (if the flag above already says true, this must be true)
+- character_accountability_detected: true if the OTHER PERSON (character)
+  has taken responsibility for their actions, either just now or earlier
+  (if the flag above already says true, this must be true)
+- user_repeating_met_demand: true ONLY if the user's NEW reply demands or
+  insists on something (an apology, accountability, acknowledgment) that
+  the other person has CLEARLY ALREADY given earlier in the conversation,
+  and the user's new reply does not acknowledge that it was already given.
+  This is a missed-opportunity signal, not a punishment — false in all
+  other cases, including when no such demand is being repeated.
 
 Respond ONLY in this exact JSON format, no extra text, no markdown fences:
 
@@ -212,7 +233,10 @@ Respond ONLY in this exact JSON format, no extra text, no markdown fences:
     "apology_detected": true or false,
     "blame_detected": true or false,
     "accountability_detected": true or false,
-    "other_emotion_reference": true or false
+    "other_emotion_reference": true or false,
+    "character_apology_detected": true or false,
+    "character_accountability_detected": true or false,
+    "user_repeating_met_demand": true or false
 }}
 """
 
@@ -253,7 +277,10 @@ Respond ONLY in this exact JSON format, no extra text, no markdown fences:
         "apology_detected":        bool(result.get("apology_detected", False)),
         "blame_detected":          bool(result.get("blame_detected", False)),
         "accountability_detected": bool(result.get("accountability_detected", False)),
-        "other_emotion_reference": bool(result.get("other_emotion_reference", False))
+        "other_emotion_reference": bool(result.get("other_emotion_reference", False)),
+        "character_apology_detected":        bool(result.get("character_apology_detected", False)),
+        "character_accountability_detected": bool(result.get("character_accountability_detected", False)),
+        "user_repeating_met_demand":         bool(result.get("user_repeating_met_demand", False))
     }
 
 
@@ -276,6 +303,13 @@ def _score_turn(session, user_message):
         state["apology_given"] = True
     if signals["accountability_detected"]:
         state["accountability_given"] = True
+
+    # Track the CHARACTER's apology/accountability the same way, so we can
+    # tell if the user is repeating a demand that's already been met.
+    if signals["character_apology_detected"]:
+        state["character_apology_given"] = True
+    if signals["character_accountability_detected"]:
+        state["character_accountability_given"] = True
 
     ei_result = ei_evaluation_engine(
         sentiment_score=signals["sentiment_score"],
@@ -300,7 +334,10 @@ def _score_turn(session, user_message):
         "accountability_detected_this_turn": signals["accountability_detected"],
         "other_emotion_reference":           signals["other_emotion_reference"],
         "apology_satisfied_overall":         apology_for_engine,
-        "accountability_satisfied_overall":  accountability_for_engine
+        "accountability_satisfied_overall":  accountability_for_engine,
+        "character_apology_given_overall":        state["character_apology_given"],
+        "character_accountability_given_overall": state["character_accountability_given"],
+        "user_repeating_met_demand":               signals["user_repeating_met_demand"]
     }
 
     return ei_result
@@ -418,6 +455,10 @@ def end_session(session_id):
             if not intent.get("blame_detected"):
                 turn_report["highlights"].append(
                     "✅ No blame detected — you stayed focused on resolution")
+            if intent.get("user_repeating_met_demand"):
+                turn_report["highlights"].append(
+                    "💡 The other person already acknowledged this — noticing that "
+                    "and moving the conversation forward would strengthen this response")
             good_turns.append(turn_report)
 
         else:
@@ -437,6 +478,10 @@ def end_session(session_id):
             if metrics.get("context_alignment", 100) < 50:
                 turn_report["highlights"].append(
                     "❌ Your response was not relevant to the conversation")
+            if intent.get("user_repeating_met_demand"):
+                turn_report["highlights"].append(
+                    "💡 The other person already acknowledged this earlier — repeating "
+                    "the same demand can stall the conversation instead of moving it forward")
             bad_turns.append(turn_report)
 
     feedback_text = _generate_feedback(
@@ -521,6 +566,16 @@ Write 3 to 4 sentences of warm, constructive, specific feedback.
 Tell them what their biggest strength was, what their biggest weakness was,
 and one specific thing they should focus on improving.
 Speak directly to them using "you". Be encouraging but honest.
+
+IMPORTANT — match your language to the classification "{classification}":
+- "Needs Improvement" → encouraging but clearly honest that there is real
+  room to grow; do not overstate the performance
+- "Moderate Emotional Intelligence" → balanced language: genuine credit
+  for what went well, but do not call it "excellent" or "exceptional" —
+  save that language for High classifications only
+- "High Emotional Intelligence" → warm, strong praise is appropriate here
+Do not use words like "exceptional," "outstanding," or "excellent" unless
+the classification is "High Emotional Intelligence".
 """
 
     response = _groq_client.chat.completions.create(
