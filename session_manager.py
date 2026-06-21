@@ -20,6 +20,7 @@
 import os
 import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from groq import Groq
 
 from conversation_engine import build_character_profile, generate_response, GROQ_API_KEY
@@ -484,23 +485,30 @@ def end_session(session_id):
                     "the same demand can stall the conversation instead of moving it forward")
             bad_turns.append(turn_report)
 
-    feedback_text = _generate_feedback(
-        situation=session["situation"],
-        overall_score=overall_score,
-        classification=classification,
-        good_turns=good_turns,
-        bad_turns=bad_turns,
-        cultural_context=session["cultural_context"],
-        relationship_context=session["relationship_context"]
-    )
-
-    rephrasing = _generate_rephrasing(
-        situation=session["situation"],
-        conversation_history=session["conversation_history"],
-        bad_turns=bad_turns,
-        cultural_context=session["cultural_context"],
-        relationship_context=session["relationship_context"]
-    )
+    # _generate_feedback and _generate_rephrasing are fully independent of
+    # each other — run them in parallel instead of waiting on one then the
+    # other, since this is the main source of end_session being slow.
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        feedback_future = executor.submit(
+            _generate_feedback,
+            situation=session["situation"],
+            overall_score=overall_score,
+            classification=classification,
+            good_turns=good_turns,
+            bad_turns=bad_turns,
+            cultural_context=session["cultural_context"],
+            relationship_context=session["relationship_context"]
+        )
+        rephrasing_future = executor.submit(
+            _generate_rephrasing,
+            situation=session["situation"],
+            conversation_history=session["conversation_history"],
+            bad_turns=bad_turns,
+            cultural_context=session["cultural_context"],
+            relationship_context=session["relationship_context"]
+        )
+        feedback_text = feedback_future.result()
+        rephrasing    = rephrasing_future.result()
 
     conversation_history = session["conversation_history"]
 
@@ -594,9 +602,7 @@ def _generate_rephrasing(situation, conversation_history, bad_turns, cultural_co
     if not bad_turns:
         return []
 
-    rephrased = []
-
-    for turn in bad_turns:
+    def _rephrase_one(turn):
         turn_index = turn["turn_number"] - 1
         preceding_ai_message = ""
         if 0 <= turn_index < len(conversation_history):
@@ -629,11 +635,18 @@ formal or perfect. Just the rephrased message, nothing else.
             temperature=0.6
         )
 
-        rephrased.append({
+        return {
             "turn_number": turn["turn_number"],
             "original":    turn["user_message"],
             "rephrased":   response.choices[0].message.content.strip(),
             "problems":    turn["highlights"]
-        })
+        }
 
-    return rephrased
+    # Run all rephrasing calls in parallel — they are fully independent of
+    # each other, so there is no reason to wait on them one at a time.
+    with ThreadPoolExecutor(max_workers=min(len(bad_turns), 8)) as executor:
+        results = list(executor.map(_rephrase_one, bad_turns))
+
+    # Keep output ordered by turn number regardless of which thread finished first
+    results.sort(key=lambda r: r["turn_number"])
+    return results
