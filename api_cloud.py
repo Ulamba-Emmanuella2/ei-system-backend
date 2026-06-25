@@ -4,24 +4,12 @@
 # ============================================================
 
 import os
-import requests
 from flask import Flask, request, jsonify
 from pipeline_cloud import analyze_ei_cloud
 from session_manager import start_session, process_reply, end_session, get_session
 
-RECAPTCHA_SECRET = os.environ.get("RECAPTCHA_SECRET_KEY", "")
 app = Flask(__name__)
 
-def verify_recaptcha(token):
-    response = requests.post(
-        "https://www.google.com/recaptcha/api/siteverify",
-        data={
-            "secret": RECAPTCHA_SECRET,
-            "response": token
-        }
-    )
-    result = response.json()
-    return result.get("success", False)
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -37,10 +25,6 @@ def analyze():
 
     if not data:
         return jsonify({"error": "No JSON body received"}), 400
-
-    token = data.get("recaptcha_token")
-    if not verify_recaptcha(token):
-        return jsonify({"error": "reCAPTCHA verification failed"}), 403
 
     required = ["scenario_text", "response_text", "scenario_requires_apology"]
     missing  = [f for f in required if f not in data]
@@ -95,11 +79,6 @@ def start():
     data = request.get_json()
     if not data:
         return jsonify({"error": "No JSON body received"}), 400
-
-    token = data.get("recaptcha_token")
-    if not verify_recaptcha(token):
-        return jsonify({"error": "reCAPTCHA verification failed"}), 403
-
     try:
         result = start_session(
             situation=data["situation"],
