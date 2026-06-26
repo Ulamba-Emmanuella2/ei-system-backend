@@ -5,10 +5,12 @@
 
 import os
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from pipeline_cloud import analyze_ei_cloud
 from session_manager import start_session, process_reply, end_session, get_session
 
 app = Flask(__name__)
+CORS(app)
 
 
 @app.route("/health", methods=["GET"])
