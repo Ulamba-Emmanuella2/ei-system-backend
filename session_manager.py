@@ -9,9 +9,6 @@
 #   sentiment, toxicity, emotion alignment, similarity/relevance,
 #   directness, confrontation, apology, blame, accountability,
 #   other_emotion_reference.
-# - ei_engine.py is UNCHANGED — same lookup tables, same cultural
-#   adaptation math, same metric names, same weights. It simply
-#   receives better-informed inputs.
 # - apology_given and accountability_given still persist once true
 #   for the rest of the session (Groq is also told this directly,
 #   as a safety net on top of persistence).
@@ -90,10 +87,9 @@ def start_session(
     }
 
     return {
-        "session_id":      session_id,
-        "opening_message": profile["opening_message"],
+        "session_id": session_id,
         "character": {
-            "description":     profile["character_description"],
+            "description": profile["character_description"],
             "emotional_state": profile["emotional_state"]
         }
     }

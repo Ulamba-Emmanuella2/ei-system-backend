@@ -127,7 +127,6 @@ def build_character_profile(situation, relationship_context, cultural_context, g
         profile["scenario_requires_apology"] = scenario_requires_apology_default
 
     profile["goal"] = normalized_goal
-    profile["opening_message"] = generate_opening_message(situation, profile, normalized_goal)
     return profile
 
 
