@@ -88,6 +88,7 @@ def start_session(
 
     return {
         "session_id": session_id,
+        "opening_message": "Hello. Let's talk about this.",
         "character": {
             "description": profile["character_description"],
             "emotional_state": profile["emotional_state"]
